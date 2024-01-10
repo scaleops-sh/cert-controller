@@ -15,6 +15,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/go-logr/logr"
 	"github.com/pkg/errors"
 	"go.uber.org/atomic"
 	corev1 "k8s.io/api/core/v1"
@@ -387,12 +388,12 @@ func (cr *CertRotator) refreshCerts(refreshCA bool, secret *corev1.Secret) error
 	return nil
 }
 
-func injectCert(updatedResource *unstructured.Unstructured, certPem []byte, webhookType WebhookType) error {
+func injectCert(log logr.Logger, updatedResource *unstructured.Unstructured, certPem []byte, webhookType WebhookType) error {
 	switch webhookType {
 	case Validating:
-		return injectCertToWebhook(updatedResource, certPem)
+		return injectCertToWebhook(log, updatedResource, certPem)
 	case Mutating:
-		return injectCertToWebhook(updatedResource, certPem)
+		return injectCertToWebhook(log, updatedResource, certPem)
 	case CRDConversion:
 		return injectCertToConversionWebhook(updatedResource, certPem)
 	case APIService:
@@ -403,27 +404,36 @@ func injectCert(updatedResource *unstructured.Unstructured, certPem []byte, webh
 	return fmt.Errorf("incorrect webhook type")
 }
 
-func injectCertToWebhook(wh *unstructured.Unstructured, certPem []byte) error {
+func injectCertToWebhook(log logr.Logger, wh *unstructured.Unstructured, certPem []byte) error {
 	webhooks, found, err := unstructured.NestedSlice(wh.Object, "webhooks")
 	if err != nil {
+		log.Error(err, "failed to get nested slice")
 		return err
 	}
 	if !found {
+		log.Error(fmt.Errorf("failed to find nested slice"), "nested slice webhooks not found")
 		return nil
 	}
 	for i, h := range webhooks {
 		hook, ok := h.(map[string]interface{})
 		if !ok {
-			return errors.Errorf("webhook %d is not well-formed", i)
-		}
-		if err := unstructured.SetNestedField(hook, base64.StdEncoding.EncodeToString(certPem), "clientConfig", "caBundle"); err != nil {
+			err = errors.Errorf("webhook %d is not well-formed", i)
+			log.Error(err, "webhook is not well-formed")
 			return err
 		}
+		log.V(4).Info("injecting cert to webhook")
+		if err := unstructured.SetNestedField(hook, base64.StdEncoding.EncodeToString(certPem), "clientConfig", "caBundle"); err != nil {
+			log.Error(err, "failed to set nested slice")
+			return err
+		}
+		log.V(4).Info("successfully inserted nested slice into webhook")
 		webhooks[i] = hook
 	}
 	if err := unstructured.SetNestedSlice(wh.Object, webhooks, "webhooks"); err != nil {
+		log.Error(err, "failed to set nested slice of cr")
 		return err
 	}
+	log.V(4).Info("successfully inserted nested slice into cr")
 	return nil
 }
 
@@ -826,11 +836,12 @@ func (r *ReconcileWH) ensureCerts(certPem []byte) error {
 		}
 
 		log.Info("Ensuring CA cert", "name", webhook.Name, "gvk", gvk)
-		if err := injectCert(updatedResource, certPem, webhook.Type); err != nil {
+		if err := injectCert(log, updatedResource, certPem, webhook.Type); err != nil {
 			log.Error(err, "Unable to inject cert to webhook.")
 			anyError = err
 			continue
 		}
+		log.V(3).Info("Updating webhook with certificate yaml")
 		opts := []client.UpdateOption{}
 		if r.fieldOwner != "" {
 			opts = append(opts, client.FieldOwner(r.fieldOwner))
@@ -840,6 +851,7 @@ func (r *ReconcileWH) ensureCerts(certPem []byte) error {
 			anyError = err
 			continue
 		}
+		log.V(3).Info("Updating webhook with certificate in cluster")
 	}
 	return anyError
 }
