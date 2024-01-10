@@ -755,11 +755,11 @@ func (r *ReconcileWH) Reconcile(ctx context.Context, request reconcile.Request) 
 	if request.NamespacedName != r.secretKey {
 		return reconcile.Result{}, nil
 	}
-
+	crLog.V(4).Info("reconciling secret", "name", request.NamespacedName)
 	if !r.cache.WaitForCacheSync(ctx) {
 		return reconcile.Result{}, errors.New("cache not ready")
 	}
-
+	crLog.V(4).Info("cache synced", "name", request.NamespacedName)
 	secret := &corev1.Secret{}
 	if err := r.cache.Get(r.ctx, request.NamespacedName, secret); err != nil {
 		if k8sErrors.IsNotFound(err) {
@@ -770,36 +770,40 @@ func (r *ReconcileWH) Reconcile(ctx context.Context, request reconcile.Request) 
 		// Error reading the object - requeue the request.
 		return reconcile.Result{Requeue: true}, err
 	}
-
+	crLog.V(4).Info("got secret", "name", request.NamespacedName)
 	if secret.GetDeletionTimestamp().IsZero() {
+		crLog.V(4).Info("secret not deleted, processing now", "name", request.NamespacedName)
 		if r.refreshCertIfNeededDelegate != nil {
+			crLog.V(4).Info("refreshing cert if needed", "name", request.NamespacedName)
 			rotatedCA, err := r.refreshCertIfNeededDelegate()
 			if err != nil {
 				crLog.Error(err, "error rotating certs on secret reconcile")
 				return reconcile.Result{}, err
 			}
-
+			crLog.V(4).Info("successfully refreshed cert if needed", "name", request.NamespacedName, "rotatedCA", rotatedCA)
 			// if we did rotate the CA, the secret is stale so let's return
 			if rotatedCA {
 				return reconcile.Result{}, nil
 			}
 		}
 
+		crLog.V(4).Info("checking if secret is valid", "name", request.NamespacedName)
 		artifacts, err := buildArtifactsFromSecret(secret)
 		if err != nil {
 			crLog.Error(err, "secret is not well-formed, cannot update webhook configurations")
 			return reconcile.Result{}, nil
 		}
 
+		crLog.V(4).Info("checking if ensuring that CRs are synced with secret", "name", request.NamespacedName)
 		// Ensure certs on webhooks
 		if err := r.ensureCerts(artifacts.CertPEM); err != nil {
 			return reconcile.Result{}, err
 		}
-
+		crLog.V(4).Info("successfully ensured certs", "name", request.NamespacedName)
 		// Set CAInjected if the reconciler has not exited early.
 		r.wasCAInjected.Store(true)
 	}
-
+	crLog.V(4).Info("finished reconcile", "name", request.NamespacedName)
 	return reconcile.Result{}, nil
 }
 
